@@ -41,6 +41,78 @@ TEAM_TO_DIVISION = {
     for team in teams
 }
 
+# Team market size/viewership value (higher = larger market/fanbase)
+# Based on TV market rankings and team popularity
+TEAM_MARKET_VALUES = {
+    "DAL": 100,  # Largest market
+    "NYG": 95,   
+    "PHI": 90,   
+    "NYJ": 85,   
+    "CHI": 85,   
+    "LAR": 80,   
+    "SF": 80,    
+    "NE": 75,    
+    "BUF": 75,   
+    "LAC": 70,   
+    "DEN": 70,   
+    "KC": 70,    
+    "MIN": 65,   
+    "PIT": 65,   
+    "BAL": 65,   
+    "WAS": 60,   
+    "SEA": 60,   
+    "GB": 60,    
+    "DET": 55,   
+    "NO": 55,    
+    "TB": 55,    
+    "ATL": 50,   
+    "MIA": 50,   
+    "CIN": 50,   
+    "HOU": 50,   
+    "ARI": 45,   
+    "CAR": 40,   
+    "IND": 40,   
+    "TEN": 40,   
+    "JAX": 35,   
+    "LV": 35,    
+    "CLE": 50,   
+}
+
+# High-profile rivalries that draw viewership
+# Rivalries are bidirectional and should be prioritized for good slots
+KEY_RIVALRIES = {
+    frozenset(["DAL", "PHI"]),  # NFC East
+    frozenset(["DAL", "NYG"]),
+    frozenset(["DAL", "WAS"]),
+    frozenset(["PHI", "NYG"]),
+    frozenset(["PHI", "WAS"]),
+    frozenset(["NYG", "WAS"]),
+    frozenset(["SF", "LAR"]),   # NFC West
+    frozenset(["SF", "SEA"]),
+    frozenset(["LAR", "SEA"]),
+    frozenset(["PIT", "BAL"]),  # AFC North
+    frozenset(["PIT", "CLE"]),
+    frozenset(["BAL", "CIN"]),
+    frozenset(["NE", "NYJ"]),   # AFC East
+    frozenset(["NE", "MIA"]),
+    frozenset(["NE", "BUF"]),
+    frozenset(["NYJ", "MIA"]),
+    frozenset(["NYJ", "BUF"]),
+    frozenset(["MIA", "BUF"]),
+    frozenset(["KC", "LAC"]),   # AFC West
+    frozenset(["KC", "DEN"]),
+    frozenset(["LAC", "DEN"]),
+    frozenset(["GB", "MIN"]),   # NFC North
+    frozenset(["GB", "CHI"]),
+    frozenset(["GB", "DET"]),
+    frozenset(["MIN", "CHI"]),
+    frozenset(["MIN", "DET"]),
+    frozenset(["CHI", "DET"]),
+    frozenset(["NO", "TB"]),    # NFC South
+    frozenset(["ATL", "TB"]),
+    frozenset(["ATL", "CAR"]),
+}
+
 
 @dataclass(frozen=True)
 class Game:
@@ -94,6 +166,11 @@ class NFLSchedulerCPSAT:
         self.team_week_day_played: dict[tuple[str, int, str], cp_model.IntVar] = {}
         self.team_week_timezone_played: dict[tuple[str, int, int], cp_model.IntVar] = {}
         self.team_week_road: dict[tuple[str, int], cp_model.IntVar] = {}
+        
+        # For TV viewership optimization
+        self.slot_values: dict[int, int] = {}  # slot_id -> viewership importance value
+        self.game_quality_scores: dict[int, int] = {}  # game_idx -> base quality score
+        self.game_slot_scores: dict[tuple[int, int], int] = {}  # (game_idx, slot_idx) -> combined score
 
     @staticmethod
     def read_simple_csv(path: Path) -> list[dict[str, str]]:
@@ -248,6 +325,81 @@ class NFLSchedulerCPSAT:
                     ],
                     f"game_{game_idx}_week_{week}_tz_{venue_tz}",
                 )
+
+    def calculate_slot_values(self):
+        """Assign viewership importance values to each slot based on day and time."""
+        for slot in self.slots:
+            # Prime time slots get highest values
+            if slot.international:
+                self.slot_values[slot.slot_id] = 10  # International games are lowest priority
+            elif slot.day == "Thursday" and slot.time_et in ("20:20", "20:30"):
+                self.slot_values[slot.slot_id] = 100  # Thursday Night Football
+            elif slot.day == "Sunday" and slot.time_et == "20:30":
+                self.slot_values[slot.slot_id] = 90  # Sunday Night Football
+            elif slot.day == "Monday" and slot.time_et == "20:15":
+                self.slot_values[slot.slot_id] = 85  # Monday Night Football
+            elif slot.day == "Sunday" and slot.time_et == "16:30":
+                self.slot_values[slot.slot_id] = 80  # Late Sunday afternoon
+            elif slot.day == "Sunday" and slot.time_et == "13:00":
+                self.slot_values[slot.slot_id] = 70  # Early Sunday afternoon
+            elif slot.day == "Saturday":
+                self.slot_values[slot.slot_id] = 65  # Saturday games
+            elif slot.day == "Sunday" and slot.time_et == "09:30":
+                self.slot_values[slot.slot_id] = 50  # Early morning Sunday
+            else:
+                self.slot_values[slot.slot_id] = 40  # Other times
+
+    def is_rivalry(self, team1: str, team2: str) -> bool:
+        """Check if two teams are in a key rivalry."""
+        return frozenset([team1, team2]) in KEY_RIVALRIES
+
+    def calculate_game_quality_scores(self):
+        """Calculate the base quality score for each game based on teams involved."""
+        for game_idx, game in enumerate(self.games):
+            # Base score: average of both teams' market values
+            home_score = TEAM_MARKET_VALUES.get(game.home, 30)
+            away_score = TEAM_MARKET_VALUES.get(game.away, 30)
+            base_score = (home_score + away_score) // 2
+            
+            # Add bonus for rivalries (high-interest matchups)
+            rivalry_bonus = 0
+            if self.is_rivalry(game.home, game.away):
+                rivalry_bonus = 20
+            
+            self.game_quality_scores[game_idx] = base_score + rivalry_bonus
+
+    def calculate_game_slot_scores(self):
+        """Calculate the combined score for each game-slot pair."""
+        for game_idx in range(len(self.games)):
+            game_quality = self.game_quality_scores[game_idx]
+            for slot_id, slot_value in self.slot_values.items():
+                # Combined score is quality * slot importance
+                # Normalized by dividing by 100 to scale reasonably
+                self.game_slot_scores[(game_idx, slot_id)] = (game_quality * slot_value) // 10
+
+    def add_viewership_objective(self):
+        """Add objective function to maximize TV viewership."""
+        # Create a more efficient objective using element constraints
+        # For each game, determine its score based on which slot it's assigned to
+        objective_terms = []
+        
+        for game_idx in range(len(self.games)):
+            # Create an IntVar representing the score for this game's slot assignment
+            slot_assignment = self.game_to_slot[game_idx]
+            
+            # Build a mapping of slot_id -> score for this game
+            slot_scores = []
+            for slot_id in range(len(self.slots)):
+                score = self.game_slot_scores[(game_idx, slot_id)]
+                slot_scores.append(score)
+            
+            # Create a variable that takes the score value corresponding to the assigned slot
+            game_score = self.model.NewIntVar(0, max(slot_scores) if slot_scores else 0, f"game_score_{game_idx}")
+            self.model.AddElement(slot_assignment, slot_scores, game_score)
+            objective_terms.append(game_score)
+        
+        if objective_terms:
+            self.model.Maximize(sum(objective_terms))
 
     def make_team_week_helpers(self):
         for team in self.teams:
@@ -459,6 +611,12 @@ class NFLSchedulerCPSAT:
         self.add_bye_week_window_constraint()
         self.add_week_18_division_games_constraint()
         self.add_no_cross_country_ping_pong_constraint()
+        
+        # TV viewership optimization
+        self.calculate_slot_values()
+        self.calculate_game_quality_scores()
+        self.calculate_game_slot_scores()
+        self.add_viewership_objective()
 
     def solve(
         self,
