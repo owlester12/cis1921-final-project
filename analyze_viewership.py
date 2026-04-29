@@ -4,7 +4,7 @@
 from pathlib import Path
 from nfl_cp_sat import TEAM_MARKET_VALUES, KEY_RIVALRIES
 
-schedule_file = Path("solved_schedule_cp_viewership.txt")
+schedule_file = Path("outputs/solved_schedule_cp_viewership.txt")
 
 if not schedule_file.exists():
     print("Schedule not found. Run run_solver.py first.")

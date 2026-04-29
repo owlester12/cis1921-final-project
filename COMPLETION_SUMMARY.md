@@ -91,7 +91,7 @@ Ranking | Week | Day      | Time   | Matchup          | Quality | Note
    - 73,984 pre-calculated game-slot scores
 
 ### Solution & Analysis:
-2. **solved_schedule_cp_viewership.txt** - Full 18-week optimized schedule
+2. **outputs/solved_schedule_cp_viewership.txt** - Full 18-week optimized schedule
 3. **analyze_viewership.py** - Analysis script showing prime-time quality
 4. **test_cp_sat.py** - Validation tests for new optimization logic
 5. **run_solver.py** - Solver runner with 5-minute timeout
@@ -152,8 +152,8 @@ python analyze_viewership.py
 from nfl_cp_sat import NFLSchedulerCPSAT
 
 scheduler = NFLSchedulerCPSAT(
-    "nfl_2025_2026_regular_season_team_abbreviations.csv",
-    "nfl_2025_2026_regular_season_et_international_only.csv",
+    "csvs/nfl_2025_2026_regular_season_team_abbreviations.csv",
+    "csvs/nfl_2025_2026_regular_season_et_international_only.csv",
 )
 scheduler.build_model()
 

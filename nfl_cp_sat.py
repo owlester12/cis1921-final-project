@@ -665,10 +665,10 @@ class NFLSchedulerCPSAT:
 
 
 if __name__ == "__main__":
-    output_path = Path("solved_schedule_cp.txt")
+    output_path = Path("outputs/solved_schedule_cp.txt")
     scheduler = NFLSchedulerCPSAT(
-        "nfl_2025_2026_regular_season_team_abbreviations.csv",
-        "nfl_2025_2026_regular_season_et_international_only.csv",
+        "csvs/nfl_2025_2026_regular_season_team_abbreviations.csv",
+        "csvs/nfl_2025_2026_regular_season_et_international_only.csv",
     )
     scheduler.build_model()
     schedule = scheduler.solve()
@@ -676,6 +676,7 @@ if __name__ == "__main__":
         print("UNSAT_OR_TIMEOUT")
     else:
         rendered = scheduler.format_schedule(schedule)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(rendered, encoding="utf-8")
         print(f"Wrote {output_path}")
         print(rendered)

@@ -13,8 +13,8 @@ print(f"  Top team markets: DAL={TEAM_MARKET_VALUES['DAL']}, NYG={TEAM_MARKET_VA
 print("\nTest 2: Creating scheduler instance...")
 try:
     scheduler = NFLSchedulerCPSAT(
-        "nfl_2025_2026_regular_season_team_abbreviations.csv",
-        "nfl_2025_2026_regular_season_et_international_only.csv",
+        "csvs/nfl_2025_2026_regular_season_team_abbreviations.csv",
+        "csvs/nfl_2025_2026_regular_season_et_international_only.csv",
     )
     print("  Scheduler created successfully")
 except Exception as e:

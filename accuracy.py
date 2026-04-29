@@ -1,23 +1,22 @@
 from __future__ import annotations
 
-import csv
+import argparse
 import math
 import re
-import argparse
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
+
+from nfl_sat import NFLSchedulerSAT
 
 
 SEASON_START = date(2025, 9, 4)
-SOLVED_SCHEDULE_PATH = Path("solved_schedule.txt")
-REFERENCE_SCHEDULE_PATH = Path("nfl_2025_regular_season_schedule_abbrev.csv")
-TEAM_NORMALIZATION = {
-    "WSH": "WAS",
-}
+SOLVED_SCHEDULE_PATH = Path("outputs/solved_schedule.txt")
+REFERENCE_SCHEDULE_PATH = Path("csvs/nfl_2025_regular_season_schedule_abbrev.csv")
+TEAM_NORMALIZATION = {"WSH": "WAS"}
 
-
+#Dataclass to hold info for each scheduled game
 @dataclass(frozen=True)
 class ScheduledGame:
     away: str
@@ -27,394 +26,352 @@ class ScheduledGame:
     time_et: str
 
 
-def normalize_team(team: str) -> str:
-    return TEAM_NORMALIZATION.get(team.strip(), team.strip())
+class ScheduleAccuracyEvaluator:
+    # Load both schedules and precompute all shared lookup structures.
+    def __init__(
+        self,
+        solved_schedule_path: Path,
+        reference_schedule_path: Path = REFERENCE_SCHEDULE_PATH,
+    ):
+        self.solved_games = self.read_solved_games(solved_schedule_path)
+        self.reference_games = self.read_reference_games(reference_schedule_path)
+        self.load_counters()
 
+    # Normalize team abbreviations that differ between source files.
+    @staticmethod
+    def normalize_team(team: str) -> str:
+        return TEAM_NORMALIZATION.get(team.strip(), team.strip())
 
-def parse_reference_date(value: str) -> date:
-    value = value.strip()
-    if " or " in value:
-        value = value.split(" or ", 1)[0].strip()
-    return datetime.strptime(value, "%B %d, %Y").date()
+    # Convert a calendar date into the NFL week number used by the solver.
+    @staticmethod
+    def compute_week(game_date: date) -> int:
+        return ((game_date - SEASON_START).days // 7) + 1
 
-
-def parse_time(value: str) -> str:
-    value = value.strip().lower().replace(".", "")
-    if value == "tbd":
-        return "TBD"
-    if value.endswith("a") or value.endswith("p"):
-        value = value + "m"
-    for fmt in ("%I:%M%p", "%I:%M %p", "%H:%M"):
-        try:
-            return datetime.strptime(value, fmt).strftime("%H:%M")
-        except ValueError:
-            continue
-    raise ValueError(f"Unsupported time format: {value}")
-
-
-def compute_week(game_date: date) -> int:
-    return ((game_date - SEASON_START).days // 7) + 1
-
-
-def read_reference_games(path: Path) -> list[ScheduledGame]:
-    with open(path, newline="", encoding="utf-8-sig") as handle:
-        reader = csv.DictReader(handle)
-        rows = list(reader)
-
-    games = []
-    for row in rows:
-        game_date = parse_reference_date(row["Date"])
-        game = ScheduledGame(
-            away=normalize_team(row["Away"]),
-            home=normalize_team(row["Home"]),
-            week=compute_week(game_date),
-            day=row["Day"].strip(),
-            time_et=parse_time(row["Time (ET)"]),
-        )
-        games.append(game)
-    return games
-
-
-def read_solved_games(path: Path) -> list[ScheduledGame]:
-    content = path.read_text(encoding="utf-8")
-    if not content.strip():
-        raise ValueError(f"{path} is empty.")
-
-    games = []
-    current_week = None
-    game_pattern = re.compile(
-        r"^\s*(\d{4}-\d{2}-\d{2})\s+([A-Za-z]+)\s+(\d{2}:\d{2})(?:\s+INTL)?:\s+([A-Z]+)\s+at\s+([A-Z]+)\s*$"
-    )
-
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("Week "):
-            current_week = int(line.split()[1])
-            continue
-
-        match = game_pattern.match(raw_line)
-        if not match:
-            raise ValueError(f"Could not parse solved schedule line: {raw_line}")
-
-        _game_date, day, time_et, away, home = match.groups()
-        if current_week is None:
-            raise ValueError("Encountered game line before any week header.")
-
-        game = ScheduledGame(
-            away=normalize_team(away),
-            home=normalize_team(home),
-            week=current_week,
-            day=day,
-            time_et=time_et,
-        )
-        games.append(game)
-
-    return games
-
-
-def build_matchup_map(games: list[ScheduledGame]) -> dict[tuple[str, str], ScheduledGame]:
-    result = {}
-    for game in games:
-        result[(game.away, game.home)] = game
-    return result
-
-
-def compute_accuracy(
-    solved: dict[tuple[str, str], ScheduledGame],
-    reference: dict[tuple[str, str], ScheduledGame],
-) -> tuple[int, int, int]:
-    week_matches = 0
-    exact_slot_matches = 0
-
-    for matchup, ref_game in reference.items():
-        solved_game = solved.get(matchup)
-        if solved_game is None:
-            continue
-        if solved_game.week == ref_game.week:
-            week_matches += 1
-        if (
-            solved_game.week == ref_game.week
-            and solved_game.day == ref_game.day
-            and solved_game.time_et == ref_game.time_et
-        ):
-            exact_slot_matches += 1
-
-    return week_matches, exact_slot_matches, len(reference)
-
-
-def compute_timeslot_accuracy(
-    solved: dict[tuple[str, str], ScheduledGame],
-    reference: dict[tuple[str, str], ScheduledGame],
-) -> tuple[int, int]:
-    matches = 0
-
-    for matchup, ref_game in reference.items():
-        solved_game = solved.get(matchup)
-        if solved_game is None:
-            continue
-        if solved_game.day == ref_game.day and solved_game.time_et == ref_game.time_et:
-            matches += 1
-
-    return matches, len(reference)
-
-
-def time_window(time_et: str) -> str | None:
-    if ":" not in time_et:
+    # Bucket kickoff times into broad TV windows.
+    @staticmethod
+    def time_window(time_et: str) -> str | None:
+        if ":" not in time_et:
+            return None
+        hour = int(time_et.split(":", 1)[0])
+        if hour == 13:
+            return "lunch"
+        if 16 <= hour <= 17:
+            return "afternoon"
+        if hour == 20:
+            return "night"
         return None
-    hour_text, _minute_text = time_et.split(":", 1)
-    hour = int(hour_text)
-    if hour == 13:
-        return "lunch"
-    if 16 <= hour <= 17:
-        return "afternoon"
-    if hour == 20:
-        return "night"
-    return None
 
+    # Computes chance that if you randomly choose some number of slots without replacement, you get at least one item from a target group
+    # P(at least one) = 1 - P(none) = 1 - (non-target slots choose draws) / (combinations of total slots choose draws)
+    @staticmethod
+    def probability_at_least_one(total: int, successful: int, draws: int) -> float:
+        if successful <= 0:
+            return 0.0
+        if draws > total - successful:
+            return 1.0
+        return 1.0 - math.comb(total - successful, draws) / math.comb(total, draws)
 
-def compute_time_window_accuracy(
-    solved: dict[tuple[str, str], ScheduledGame],
-    reference: dict[tuple[str, str], ScheduledGame],
-) -> tuple[int, int]:
-    matches = 0
-    total = 0
+    # Key games by ordered away/home matchup.
+    @staticmethod
+    def build_matchup_map(games: list[ScheduledGame]) -> dict[tuple[str, str], ScheduledGame]:
+        return {(game.away, game.home): game for game in games}
 
-    for matchup, ref_game in reference.items():
-        ref_window = time_window(ref_game.time_et)
-        if ref_window is None:
-            continue
+    # Format a metric with its random baseline.
+    @staticmethod
+    def format_metric(matches: int, total: int, random_rate: float) -> str:
+        return f"{matches}/{total} ({matches / total:.2%}; random ~{random_rate:.2%})"
 
-        solved_game = solved.get(matchup)
-        if solved_game is None:
-            continue
+    # Read the official NFL schedule CSV into ScheduledGame objects.
+    @staticmethod
+    def read_reference_games(path: Path) -> list[ScheduledGame]:
+        games = []
+        for row in NFLSchedulerSAT.read_simple_csv(path):
+            date_text = row["Date"].split(" or ", 1)[0].strip()
+            game_date = NFLSchedulerSAT.parse_csv_date(date_text)
+            games.append(
+                ScheduledGame(
+                    away=ScheduleAccuracyEvaluator.normalize_team(row["Away"]),
+                    home=ScheduleAccuracyEvaluator.normalize_team(row["Home"]),
+                    week=ScheduleAccuracyEvaluator.compute_week(game_date),
+                    day=row["Day"].strip(),
+                    time_et=NFLSchedulerSAT.parse_csv_time(row["Time (ET)"]),
+                )
+            )
+        return games
 
-        total += 1
-        if time_window(solved_game.time_et) == ref_window:
-            matches += 1
+    # Parse a generated text schedule such as outputs/solved_schedule.txt.
+    @staticmethod
+    def read_solved_games(path: Path) -> list[ScheduledGame]:
+        content = path.read_text(encoding="utf-8")
+        if not content.strip():
+            raise ValueError(f"{path} is empty.")
 
-    return matches, total
-
-
-def compute_home_slot_accuracy(
-    solved_games: list[ScheduledGame],
-    reference_games: list[ScheduledGame],
-) -> tuple[int, int]:
-    solved_slots = Counter(
-        (game.home, game.week, game.day, game.time_et) for game in solved_games
-    )
-    reference_slots = Counter(
-        (game.home, game.week, game.day, game.time_et) for game in reference_games
-    )
-    matches = sum((solved_slots & reference_slots).values())
-    return matches, len(reference_games)
-
-
-def compute_home_week_accuracy(
-    solved_games: list[ScheduledGame],
-    reference_games: list[ScheduledGame],
-) -> tuple[int, int]:
-    solved_home_weeks = Counter((game.home, game.week) for game in solved_games)
-    reference_home_weeks = Counter((game.home, game.week) for game in reference_games)
-    matches = sum((solved_home_weeks & reference_home_weeks).values())
-    return matches, len(reference_games)
-
-
-def compute_bye_week_accuracy(
-    solved_games: list[ScheduledGame],
-    reference_games: list[ScheduledGame],
-) -> tuple[int, int, dict[str, list[int]], dict[str, list[int]]]:
-    solved_weeks = defaultdict(set)
-    reference_weeks = defaultdict(set)
-    teams = set()
-
-    for game in solved_games:
-        teams.update((game.away, game.home))
-        solved_weeks[game.away].add(game.week)
-        solved_weeks[game.home].add(game.week)
-    for game in reference_games:
-        teams.update((game.away, game.home))
-        reference_weeks[game.away].add(game.week)
-        reference_weeks[game.home].add(game.week)
-
-    solved_byes = {}
-    reference_byes = {}
-    matches = 0
-    for team in sorted(teams):
-        solved_bye = sorted(set(range(1, 19)) - solved_weeks[team])
-        reference_bye = sorted(set(range(1, 19)) - reference_weeks[team])
-        solved_byes[team] = solved_bye
-        reference_byes[team] = reference_bye
-        if solved_bye == reference_bye:
-            matches += 1
-
-    return matches, len(teams), solved_byes, reference_byes
-
-
-def build_team_week_sequence(
-    games: list[ScheduledGame],
-) -> dict[str, list[tuple[str, str] | tuple[str]]]:
-    teams = sorted({team for game in games for team in (game.away, game.home)})
-    sequences = {
-        team: [("BYE",) for _week in range(18)]
-        for team in teams
-    }
-
-    for game in games:
-        week_index = game.week - 1
-        away_event = ("A", game.home)
-        home_event = ("H", game.away)
-
-        if sequences[game.away][week_index] != ("BYE",):
-            raise ValueError(f"{game.away} has multiple games in week {game.week}.")
-        if sequences[game.home][week_index] != ("BYE",):
-            raise ValueError(f"{game.home} has multiple games in week {game.week}.")
-
-        sequences[game.away][week_index] = away_event
-        sequences[game.home][week_index] = home_event
-
-    return sequences
-
-
-def compute_consecutive_pair_accuracy(
-    solved_games: list[ScheduledGame],
-    reference_games: list[ScheduledGame],
-) -> tuple[int, int, dict[str, tuple[int, int]]]:
-    solved_sequences = build_team_week_sequence(solved_games)
-    reference_sequences = build_team_week_sequence(reference_games)
-    teams = sorted(set(solved_sequences) | set(reference_sequences))
-
-    matches = 0
-    total = 0
-    by_team = {}
-    bye_sequence = [("BYE",) for _week in range(18)]
-
-    for team in teams:
-        solved_sequence = solved_sequences.get(team, bye_sequence)
-        reference_sequence = reference_sequences.get(team, bye_sequence)
-
-        solved_pairs = Counter(
-            (solved_sequence[index], solved_sequence[index + 1])
-            for index in range(17)
-        )
-        reference_pairs = Counter(
-            (reference_sequence[index], reference_sequence[index + 1])
-            for index in range(17)
+        games = []
+        current_week = None
+        game_pattern = re.compile(
+            r"^\s*(\d{4}-\d{2}-\d{2})\s+([A-Za-z]+)\s+(\d{2}:\d{2})(?:\s+INTL)?:\s+([A-Z]+)\s+at\s+([A-Z]+)\s*$"
         )
 
-        team_matches = sum((solved_pairs & reference_pairs).values())
-        team_total = sum(reference_pairs.values())
-        matches += team_matches
-        total += team_total
-        by_team[team] = (team_matches, team_total)
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("Week "):
+                current_week = int(line.split()[1])
+                continue
 
-    return matches, total, by_team
+            match = game_pattern.match(raw_line)
+            if not match:
+                raise ValueError(f"Could not parse solved schedule line: {raw_line}")
+            if current_week is None:
+                raise ValueError("Encountered game line before any week header.")
 
+            _game_date, day, time_et, away, home = match.groups()
+            games.append(
+                ScheduledGame(
+                    away=ScheduleAccuracyEvaluator.normalize_team(away),
+                    home=ScheduleAccuracyEvaluator.normalize_team(home),
+                    week=current_week,
+                    day=day,
+                    time_et=time_et,
+                )
+            )
+        return games
 
-def probability_at_least_one(total: int, successful: int, draws: int) -> float:
-    if successful <= 0:
-        return 0.0
-    if draws > total - successful:
-        return 1.0
-    return 1.0 - math.comb(total - successful, draws) / math.comb(total, draws)
+    # Precompute all repeated lookup maps and counters.
+    def load_counters(self):
+        self.total_slots = len(self.solved_games)
+        self.reference_matchups = self.build_matchup_map(self.reference_games)
+        self.solved_matchups = self.build_matchup_map(self.solved_games)
 
-
-def compute_random_expectations(
-    reference_games: list[ScheduledGame],
-    slot_source_games: list[ScheduledGame],
-) -> dict[str, float]:
-    total_slots = len(slot_source_games)
-    week_counts = Counter(game.week for game in slot_source_games)
-    exact_slot_counts = Counter(
-        (game.week, game.day, game.time_et) for game in slot_source_games
-    )
-    timeslot_counts = Counter(
-        (game.day, game.time_et) for game in slot_source_games
-    )
-    window_counts = Counter(
-        window
-        for game in slot_source_games
-        if (window := time_window(game.time_et)) is not None
-    )
-    home_game_counts = Counter(game.home for game in reference_games)
-
-    week_expected = sum(
-        week_counts[game.week] / total_slots
-        for game in reference_games
-    ) / len(reference_games)
-    exact_slot_expected = sum(
-        exact_slot_counts[(game.week, game.day, game.time_et)] / total_slots
-        for game in reference_games
-    ) / len(reference_games)
-    timeslot_expected = sum(
-        timeslot_counts[(game.day, game.time_et)] / total_slots
-        for game in reference_games
-    ) / len(reference_games)
-
-    window_reference_games = [
-        game for game in reference_games if time_window(game.time_et) is not None
-    ]
-    time_window_expected = sum(
-        window_counts[time_window(game.time_et)] / total_slots
-        for game in window_reference_games
-    ) / len(window_reference_games)
-
-    reference_home_weeks = Counter((game.home, game.week) for game in reference_games)
-    home_week_expected_matches = 0.0
-    for (home, week), reference_count in reference_home_weeks.items():
-        probability = probability_at_least_one(
-            total_slots,
-            week_counts[week],
-            home_game_counts[home],
+        self.solved_week_counts = Counter(game.week for game in self.solved_games)
+        self.solved_exact_slot_counts = Counter(
+            (game.week, game.day, game.time_et) for game in self.solved_games
         )
-        home_week_expected_matches += reference_count * probability
-
-    reference_home_slots = Counter(
-        (game.home, game.week, game.day, game.time_et)
-        for game in reference_games
-    )
-    home_slot_expected_matches = 0.0
-    for (home, week, day, time_et), reference_count in reference_home_slots.items():
-        probability = probability_at_least_one(
-            total_slots,
-            exact_slot_counts[(week, day, time_et)],
-            home_game_counts[home],
+        self.solved_timeslot_counts = Counter(
+            (game.day, game.time_et) for game in self.solved_games
         )
-        home_slot_expected_matches += reference_count * probability
+        self.solved_window_counts = Counter(
+            window
+            for game in self.solved_games
+            if (window := self.time_window(game.time_et)) is not None
+        )
 
-    legal_bye_weeks = set(range(5, 15))
-    team_weeks = defaultdict(set)
-    for game in reference_games:
-        team_weeks[game.away].add(game.week)
-        team_weeks[game.home].add(game.week)
-    reference_bye_weeks = [
-        next(iter(set(range(1, 19)) - weeks_played))
-        for weeks_played in team_weeks.values()
-        if len(set(range(1, 19)) - weeks_played) == 1
-    ]
-    bye_week_expected = sum(
-        1 / len(legal_bye_weeks)
-        for bye_week in reference_bye_weeks
-        if bye_week in legal_bye_weeks
-    ) / len(reference_bye_weeks)
+        self.solved_home_weeks = Counter(
+            (game.home, game.week) for game in self.solved_games
+        )
+        self.reference_home_weeks = Counter(
+            (game.home, game.week) for game in self.reference_games
+        )
+        self.solved_home_slots = Counter(
+            (game.home, game.week, game.day, game.time_et)
+            for game in self.solved_games
+        )
+        self.reference_home_slots = Counter(
+            (game.home, game.week, game.day, game.time_et)
+            for game in self.reference_games
+        )
+        self.reference_home_game_counts = Counter(
+            game.home for game in self.reference_games
+        )
 
-    return {
-        "week": week_expected,
-        "exact_slot": exact_slot_expected,
-        "timeslot": timeslot_expected,
-        "time_window": time_window_expected,
-        "home_week": home_week_expected_matches / len(reference_games),
-        "home_slot": home_slot_expected_matches / len(reference_games),
-        "bye_week": bye_week_expected,
-        "consecutive_pairs": 1 / 18,
-    }
+        self.solved_weeks_by_team = self.build_team_week_sets(self.solved_games)
+        self.reference_weeks_by_team = self.build_team_week_sets(self.reference_games)
+        self.solved_team_sequences = self.build_team_week_sequences(self.solved_games)
+        self.reference_team_sequences = self.build_team_week_sequences(self.reference_games)
+
+    # Build the set of weeks played by each team.
+    @staticmethod
+    def build_team_week_sets(games: list[ScheduledGame]) -> dict[str, set[int]]:
+        weeks_by_team = defaultdict(set)
+        for game in games:
+            weeks_by_team[game.away].add(game.week)
+            weeks_by_team[game.home].add(game.week)
+        return weeks_by_team
+
+    # Build each team's 18-week sequence, including BYE as an event.
+    @staticmethod
+    def build_team_week_sequences(
+        games: list[ScheduledGame],
+    ) -> dict[str, list[tuple[str, str] | tuple[str]]]:
+        teams = sorted({team for game in games for team in (game.away, game.home)})
+        sequences = {team: [("BYE",) for _week in range(18)] for team in teams}
+
+        for game in games:
+            week_index = game.week - 1
+            away_event = ("A", game.home)
+            home_event = ("H", game.away)
+            if sequences[game.away][week_index] != ("BYE",):
+                raise ValueError(f"{game.away} has multiple games in week {game.week}.")
+            if sequences[game.home][week_index] != ("BYE",):
+                raise ValueError(f"{game.home} has multiple games in week {game.week}.")
+            sequences[game.away][week_index] = away_event
+            sequences[game.home][week_index] = home_event
+
+        return sequences
+
+    # Compare whether the solved matchup lands in same week as the reference/actual 
+    def matchup_week_accuracy(self) -> tuple[int, int, float]:
+        matches = 0
+        for matchup, reference_game in self.reference_matchups.items():
+            solved_game = self.solved_matchups.get(matchup)
+            if solved_game and solved_game.week == reference_game.week:
+                matches += 1
+
+        #18 weeks in a season, so approx 1/18 chance of getting it right (ignoring some weeks have slightly different number of games)
+        random_rate = 1/18
+        return matches, len(self.reference_matchups), random_rate
+
+    # Compare whether each matchup lands in the same week/day/time.
+    def exact_slot_accuracy(self) -> tuple[int, int, float]:
+        matches = 0
+        for matchup, reference_game in self.reference_matchups.items():
+            solved_game = self.solved_matchups.get(matchup)
+            if (
+                solved_game
+                and solved_game.week == reference_game.week
+                and solved_game.day == reference_game.day
+                and solved_game.time_et == reference_game.time_et
+            ):
+                matches += 1
+
+        # Shared kickoff windows mean a random game can match any slot with the
+        # same week/day/time, so the chance is count(matching slots) / total slots.
+        random_rate = sum(
+            self.solved_exact_slot_counts[(game.week, game.day, game.time_et)]
+            / self.total_slots
+            for game in self.reference_matchups.values()
+        ) / len(self.reference_matchups)
+        return matches, len(self.reference_matchups), random_rate
+
+    # Compare whether each matchup lands in the same day/time, ignoring week.
+    def timeslot_accuracy(self) -> tuple[int, int, float]:
+        matches = 0
+        for matchup, reference_game in self.reference_matchups.items():
+            solved_game = self.solved_matchups.get(matchup)
+            if (
+                solved_game
+                and solved_game.day == reference_game.day
+                and solved_game.time_et == reference_game.time_et
+            ):
+                matches += 1
+        
+        #P(randomly got correct slot) = (sum of num_slots_in_week/total_slots)
+        random_rate = sum(
+            self.solved_timeslot_counts[(game.day, game.time_et)] / self.total_slots
+            for game in self.reference_matchups.values()
+        ) / len(self.reference_matchups)
+        return matches, len(self.reference_matchups), random_rate
+
+    # Compare whether each matchup lands in the same broad time window (ignoring day and week).
+    def time_window_accuracy(self) -> tuple[int, int, float]:
+        matches = 0
+        total = 0
+        for matchup, reference_game in self.reference_matchups.items():
+            reference_window = self.time_window(reference_game.time_et)
+            solved_game = self.solved_matchups.get(matchup)
+            if reference_window is None or solved_game is None:
+                continue
+            total += 1
+            if self.time_window(solved_game.time_et) == reference_window:
+                matches += 1
+
+        #P(randomly got correct slot) = (sum of num_slots_in_week/total_slots)
+        random_rate = sum(
+            self.solved_window_counts[self.time_window(game.time_et)] / self.total_slots
+            for game in self.reference_matchups.values()
+            if self.time_window(game.time_et) is not None
+        ) / total
+        return matches, total, random_rate
+
+    # Compare whether each home team appears in the same week.
+    def home_week_accuracy(self) -> tuple[int, int, float]:
+        matches = sum((self.solved_home_weeks & self.reference_home_weeks).values())
+        random_matches = 0.0
+        # A home-week match only needs one of that team's home games to land in
+        # the target week, so use P(at least one home game hits that week).
+        for (home, week), reference_count in self.reference_home_weeks.items():
+            probability = self.probability_at_least_one(
+                self.total_slots,
+                self.solved_week_counts[week],
+                self.reference_home_game_counts[home],
+            )
+            random_matches += reference_count * probability
+        return matches, len(self.reference_games), random_matches / len(self.reference_games)
+
+    # Compare whether each home team appears in the same exact slot.
+    def home_slot_accuracy(self) -> tuple[int, int, float]:
+        matches = sum((self.solved_home_slots & self.reference_home_slots).values())
+        random_matches = 0.0
+        # Same idea as home-week, but the target bucket is the exact
+        # week/day/time slot instead of the whole week.
+        for (home, week, day, time_et), reference_count in self.reference_home_slots.items():
+            probability = self.probability_at_least_one(
+                self.total_slots,
+                self.solved_exact_slot_counts[(week, day, time_et)],
+                self.reference_home_game_counts[home],
+            )
+            random_matches += reference_count * probability
+        return matches, len(self.reference_games), random_matches / len(self.reference_games)
+
+    # Compare each team's inferred bye week.
+    def bye_week_accuracy(self) -> tuple[int, int, float]:
+        teams = sorted(set(self.solved_weeks_by_team) | set(self.reference_weeks_by_team))
+        matches = 0
+        for team in teams:
+            solved_bye = sorted(set(range(1, 19)) - self.solved_weeks_by_team[team])
+            reference_bye = sorted(set(range(1, 19)) - self.reference_weeks_by_team[team])
+            if solved_bye == reference_bye:
+                matches += 1
+
+        # NFL byes are constrained to weeks 5-14 in this project.
+        return matches, len(teams), 1 / 10
+
+    # Compare adjacent team schedule pairs without requiring the same weeks.
+    def consecutive_pair_accuracy(self) -> tuple[int, int, float]:
+        teams = sorted(set(self.solved_team_sequences) | set(self.reference_team_sequences))
+        matches = 0
+        total = 0
+        bye_sequence = [("BYE",) for _week in range(18)]
+
+        for team in teams:
+            solved_sequence = self.solved_team_sequences.get(team, bye_sequence)
+            reference_sequence = self.reference_team_sequences.get(team, bye_sequence)
+            solved_pairs = Counter(
+                (solved_sequence[index], solved_sequence[index + 1])
+                for index in range(17)
+            )
+            reference_pairs = Counter(
+                (reference_sequence[index], reference_sequence[index + 1])
+                for index in range(17)
+            )
+            matches += sum((solved_pairs & reference_pairs).values())
+            total += sum(reference_pairs.values())
+
+        # In a random ordering of 18 events, an ordered adjacent pair has probability 1/18.
+        return matches, total, 1 / 18
+
+    # Return all reportable metrics in display order.
+    def metrics(self) -> list[tuple[str, int, int, float]]:
+        return [
+            ("Correct week overall", *self.matchup_week_accuracy()),
+            ("Correct week and time slot", *self.exact_slot_accuracy()),
+            ("Correct time slot regardless of week", *self.timeslot_accuracy()),
+            ("Correct time window regardless of week/day", *self.time_window_accuracy()),
+            ("Correct home team in correct week", *self.home_week_accuracy()),
+            ("Correct home team in exact slot", *self.home_slot_accuracy()),
+            ("Correct bye week by team", *self.bye_week_accuracy()),
+            ("Correct consecutive team game pairs", *self.consecutive_pair_accuracy()),
+        ]
+
+    # Print the human-readable evaluation report.
+    def print_report(self):
+        print(f"Compared {len(self.reference_games)} games.")
+        for label, matches, total, random_rate in self.metrics():
+            print(f"{label}: {self.format_metric(matches, total, random_rate)}")
 
 
-def format_metric(matches: int, total: int, random_rate: float) -> str:
-    return f"{matches}/{total} ({matches / total:.2%}; random ~{random_rate:.2%})"
-
-
+# Parse the optional generated schedule path.
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare a generated NFL schedule against the official schedule."
@@ -431,62 +388,8 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     args = parse_args()
-    reference_games = read_reference_games(REFERENCE_SCHEDULE_PATH)
-    solved_games = read_solved_games(args.schedule_path)
-    random_expectations = compute_random_expectations(reference_games, solved_games)
-    reference = build_matchup_map(reference_games)
-    solved = build_matchup_map(solved_games)
-    week_matches, exact_slot_matches, total_games = compute_accuracy(solved, reference)
-    timeslot_matches, total_timeslot_games = compute_timeslot_accuracy(solved, reference)
-    time_window_matches, total_time_window_games = compute_time_window_accuracy(
-        solved, reference
-    )
-    home_week_matches, total_home_week_games = compute_home_week_accuracy(
-        solved_games, reference_games
-    )
-    home_slot_matches, total_slot_games = compute_home_slot_accuracy(
-        solved_games, reference_games
-    )
-    bye_week_matches, total_teams, _solved_byes, _reference_byes = compute_bye_week_accuracy(
-        solved_games, reference_games
-    )
-    consecutive_pair_matches, total_consecutive_pairs, _consecutive_pairs_by_team = (
-        compute_consecutive_pair_accuracy(solved_games, reference_games)
-    )
-
-    print(f"Compared {total_games} games.")
-    print(
-        "Correct week overall: "
-        f"{format_metric(week_matches, total_games, random_expectations['week'])}"
-    )
-    print(
-        "Correct week and time slot: "
-        f"{format_metric(exact_slot_matches, total_games, random_expectations['exact_slot'])}"
-    )
-    print(
-        "Correct time slot regardless of week: "
-        f"{format_metric(timeslot_matches, total_timeslot_games, random_expectations['timeslot'])}"
-    )
-    print(
-        f"Correct time window regardless of week/day: "
-        f"{format_metric(time_window_matches, total_time_window_games, random_expectations['time_window'])}"
-    )
-    print(
-        "Correct home team in correct week: "
-        f"{format_metric(home_week_matches, total_home_week_games, random_expectations['home_week'])}"
-    )
-    print(
-        "Correct home team in exact slot: "
-        f"{format_metric(home_slot_matches, total_slot_games, random_expectations['home_slot'])}"
-    )
-    print(
-        "Correct bye week by team: "
-        f"{format_metric(bye_week_matches, total_teams, random_expectations['bye_week'])}"
-    )
-    print(
-        f"Correct consecutive team game pairs: "
-        f"{format_metric(consecutive_pair_matches, total_consecutive_pairs, random_expectations['consecutive_pairs'])}"
-    )
+    evaluator = ScheduleAccuracyEvaluator(args.schedule_path)
+    evaluator.print_report()
 
 
 if __name__ == "__main__":
