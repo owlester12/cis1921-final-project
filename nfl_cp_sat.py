@@ -4,6 +4,7 @@ import csv
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
+from typing import Dict, List, Set, Tuple, Optional, Union
 
 try:
     from ortools.sat.python import cp_model
@@ -15,14 +16,25 @@ except ModuleNotFoundError as exc:
     ) from exc
 
 
-team_timezones = {
+# Type aliases for better readability
+TeamName = str
+DivisionName = str
+WeekNumber = int
+SlotId = int
+GameIndex = int
+TimezoneOffset = int
+MarketValue = int
+QualityScore = int
+
+# Global constants with type annotations
+team_timezones: Dict[TeamName, TimezoneOffset] = {
     "ARI": 1, "ATL": 3, "BAL": 3, "BUF": 3, "CAR": 3, "CHI": 2, "CIN": 3, "CLE": 3,
     "DAL": 2, "DEN": 1, "DET": 3, "GB": 2, "HOU": 2, "IND": 3, "JAX": 3, "KC": 2,
     "LAC": 0, "LAR": 0, "LV": 0, "MIA": 3, "MIN": 2, "NE": 3, "NO": 2, "NYG": 3,
     "NYJ": 3, "PHI": 3, "PIT": 3, "SEA": 0, "SF": 0, "TB": 3, "TEN": 2, "WAS": 3,
 }
 
-divisions = {
+divisions: Dict[DivisionName, List[TeamName]] = {
     "AFC East": ["BUF", "MIA", "NE", "NYJ"],
     "AFC North": ["BAL", "CIN", "CLE", "PIT"],
     "AFC South": ["HOU", "IND", "JAX", "TEN"],
@@ -33,9 +45,9 @@ divisions = {
     "NFC West": ["ARI", "LAR", "SF", "SEA"],
 }
 
-SAME_STADIUM_PAIRS = [("LAC", "LAR"), ("NYG", "NYJ")]
-WESTERN_HOME_TEAMS = {team for team, tz in team_timezones.items() if tz <= 1}
-TEAM_TO_DIVISION = {
+SAME_STADIUM_PAIRS: List[Tuple[TeamName, TeamName]] = [("LAC", "LAR"), ("NYG", "NYJ")]
+WESTERN_HOME_TEAMS: Set[TeamName] = {team for team, tz in team_timezones.items() if tz <= 1}
+TEAM_TO_DIVISION: Dict[TeamName, DivisionName] = {
     team: division
     for division, teams in divisions.items()
     for team in teams
@@ -43,44 +55,44 @@ TEAM_TO_DIVISION = {
 
 # Team market size/viewership value (higher = larger market/fanbase)
 # Based on TV market rankings and team popularity
-TEAM_MARKET_VALUES = {
+TEAM_MARKET_VALUES: Dict[TeamName, MarketValue] = {
     "DAL": 100,  # Largest market
-    "NYG": 95,   
-    "PHI": 90,   
-    "NYJ": 85,   
-    "CHI": 85,   
-    "LAR": 80,   
-    "SF": 80,    
-    "NE": 75,    
-    "BUF": 75,   
-    "LAC": 70,   
-    "DEN": 70,   
-    "KC": 70,    
-    "MIN": 65,   
-    "PIT": 65,   
-    "BAL": 65,   
-    "WAS": 60,   
-    "SEA": 60,   
-    "GB": 60,    
-    "DET": 55,   
-    "NO": 55,    
-    "TB": 55,    
-    "ATL": 50,   
-    "MIA": 50,   
-    "CIN": 50,   
-    "HOU": 50,   
-    "ARI": 45,   
-    "CAR": 40,   
-    "IND": 40,   
-    "TEN": 40,   
-    "JAX": 35,   
-    "LV": 35,    
-    "CLE": 50,   
+    "NYG": 95,
+    "PHI": 90,
+    "NYJ": 85,
+    "CHI": 85,
+    "LAR": 80,
+    "SF": 80,
+    "NE": 75,
+    "BUF": 75,
+    "LAC": 70,
+    "DEN": 70,
+    "KC": 70,
+    "MIN": 65,
+    "PIT": 65,
+    "BAL": 65,
+    "WAS": 60,
+    "SEA": 60,
+    "GB": 60,
+    "DET": 55,
+    "NO": 55,
+    "TB": 55,
+    "ATL": 50,
+    "MIA": 50,
+    "CIN": 50,
+    "HOU": 50,
+    "ARI": 45,
+    "CAR": 40,
+    "IND": 40,
+    "TEN": 40,
+    "JAX": 35,
+    "LV": 35,
+    "CLE": 50,
 }
 
 # High-profile rivalries that draw viewership
 # Rivalries are bidirectional and should be prioritized for good slots
-KEY_RIVALRIES = {
+KEY_RIVALRIES: Set[frozenset[TeamName]] = {
     frozenset(["DAL", "PHI"]),  # NFC East
     frozenset(["DAL", "NYG"]),
     frozenset(["DAL", "WAS"]),
@@ -116,14 +128,16 @@ KEY_RIVALRIES = {
 
 @dataclass(frozen=True)
 class Game:
-    away: str
-    home: str
+    """Represents a single NFL game matchup."""
+    away: TeamName
+    home: TeamName
 
 
 @dataclass(frozen=True)
 class Slot:
-    slot_id: int
-    week: int
+    """Represents a scheduling slot for an NFL game."""
+    slot_id: SlotId
+    week: WeekNumber
     day: str
     game_date: date
     time_et: str
@@ -131,49 +145,79 @@ class Slot:
 
 
 class NFLSchedulerCPSAT:
-    SEASON_START = date(2025, 9, 4)
+    """
+    Constraint Programming SAT solver for NFL season scheduling.
+
+    This class implements a comprehensive NFL scheduling system that maximizes
+    TV viewership while respecting all league scheduling constraints.
+    """
+
+    SEASON_START: date = date(2025, 9, 4)
 
     def __init__(
         self,
-        matchups_csv_path: str,
-        slots_csv_path: str,
-        super_bowl_champion: str = "PHI",
-    ):
-        self.matchups_csv_path = Path(matchups_csv_path)
-        self.slots_csv_path = Path(slots_csv_path)
-        self.super_bowl_champion = super_bowl_champion
+        matchups_csv_path: Union[str, Path],
+        slots_csv_path: Union[str, Path],
+        super_bowl_champion: TeamName = "PHI",
+    ) -> None:
+        """
+        Initialize the NFL scheduler.
 
-        self.games: list[Game] = []
-        self.slots: list[Slot] = []
-        self.teams = sorted(team_timezones)
-        self.weeks = list(range(1, 19))
+        Args:
+            matchups_csv_path: Path to CSV file containing team matchups
+            slots_csv_path: Path to CSV file containing available time slots
+            super_bowl_champion: Team that won Super Bowl (gets home opener)
+        """
+        self.matchups_csv_path: Path = Path(matchups_csv_path)
+        self.slots_csv_path: Path = Path(slots_csv_path)
+        self.super_bowl_champion: TeamName = super_bowl_champion
 
-        self.model = cp_model.CpModel()
-        self.game_to_slot: list[cp_model.IntVar] = []
-        self.slot_to_game: list[cp_model.IntVar] = []
+        # Core data structures
+        self.games: List[Game] = []
+        self.slots: List[Slot] = []
+        self.teams: List[TeamName] = sorted(team_timezones)
+        self.weeks: List[WeekNumber] = list(range(1, 19))
 
-        self.team_game_indices: dict[str, list[int]] = {}
-        self.team_home_game_indices: dict[str, list[int]] = {}
-        self.team_away_game_indices: dict[str, list[int]] = {}
-        self.games_by_home_team: dict[str, list[int]] = {}
-        self.slots_by_week: dict[int, list[int]] = {}
-        self.slots_by_week_day: dict[tuple[int, str], list[int]] = {}
-        self.slot_week_bools: dict[tuple[int, int], cp_model.IntVar] = {}
-        self.slot_day_bools: dict[tuple[int, int, str], cp_model.IntVar] = {}
-        self.slot_timezone_bools: dict[tuple[int, int, int], cp_model.IntVar] = {}
+        # CP-SAT model and variables
+        self.model: cp_model.CpModel = cp_model.CpModel()
+        self.game_to_slot: List[cp_model.IntVar] = []
+        self.slot_to_game: List[cp_model.IntVar] = []
 
-        self.team_week_played: dict[tuple[str, int], cp_model.IntVar] = {}
-        self.team_week_day_played: dict[tuple[str, int, str], cp_model.IntVar] = {}
-        self.team_week_timezone_played: dict[tuple[str, int, int], cp_model.IntVar] = {}
-        self.team_week_road: dict[tuple[str, int], cp_model.IntVar] = {}
-        
-        # For TV viewership optimization
-        self.slot_values: dict[int, int] = {}  # slot_id -> viewership importance value
-        self.game_quality_scores: dict[int, int] = {}  # game_idx -> base quality score
-        self.game_slot_scores: dict[tuple[int, int], int] = {}  # (game_idx, slot_idx) -> combined score
+        # Index mappings for efficient constraint building
+        self.team_game_indices: Dict[TeamName, List[GameIndex]] = {}
+        self.team_home_game_indices: Dict[TeamName, List[GameIndex]] = {}
+        self.team_away_game_indices: Dict[TeamName, List[GameIndex]] = {}
+        self.games_by_home_team: Dict[TeamName, List[GameIndex]] = {}
+        self.slots_by_week: Dict[WeekNumber, List[SlotId]] = {}
+        self.slots_by_week_day: Dict[Tuple[WeekNumber, str], List[SlotId]] = {}
+
+        # Boolean variables for constraint modeling
+        self.slot_week_bools: Dict[Tuple[GameIndex, WeekNumber], cp_model.IntVar] = {}
+        self.slot_day_bools: Dict[Tuple[GameIndex, WeekNumber, str], cp_model.IntVar] = {}
+        self.slot_timezone_bools: Dict[Tuple[GameIndex, WeekNumber, TimezoneOffset], cp_model.IntVar] = {}
+
+        # Team availability tracking
+        self.team_week_played: Dict[Tuple[TeamName, WeekNumber], cp_model.IntVar] = {}
+        self.team_week_day_played: Dict[Tuple[TeamName, WeekNumber, str], cp_model.IntVar] = {}
+        self.team_week_timezone_played: Dict[Tuple[TeamName, WeekNumber, TimezoneOffset], cp_model.IntVar] = {}
+        self.team_week_road: Dict[Tuple[TeamName, WeekNumber], cp_model.IntVar] = {}
+
+        # TV viewership optimization data
+        self.slot_values: Dict[SlotId, int] = {}  # slot_id -> viewership importance value
+        self.game_quality_scores: Dict[GameIndex, QualityScore] = {}  # game_idx -> base quality score
+        self.game_slot_scores: Dict[Tuple[GameIndex, SlotId], int] = {}  # (game_idx, slot_idx) -> combined score
 
     @staticmethod
-    def read_simple_csv(path: Path) -> list[dict[str, str]]:
+    def read_simple_csv(path: Path) -> List[Dict[str, str]]:
+        """
+        Read a CSV file and return a list of dictionaries.
+
+        Args:
+            path: Path to the CSV file
+
+        Returns:
+            List of dictionaries where each dict represents a row
+        """
         with open(path, newline="", encoding="utf-8-sig") as handle:
             reader = csv.DictReader(handle)
             return [
@@ -183,6 +227,18 @@ class NFLSchedulerCPSAT:
 
     @staticmethod
     def parse_csv_date(value: str) -> date:
+        """
+        Parse a date string from CSV into a date object.
+
+        Args:
+            value: Date string in various formats
+
+        Returns:
+            Parsed date object
+
+        Raises:
+            ValueError: If date format is unsupported
+        """
         value = value.strip()
         for fmt in ("%Y-%m-%d", "%b %d, %Y", "%B %d, %Y"):
             try:
@@ -193,6 +249,18 @@ class NFLSchedulerCPSAT:
 
     @staticmethod
     def parse_csv_time(value: str) -> str:
+        """
+        Parse a time string from CSV into 24-hour format.
+
+        Args:
+            value: Time string in 12-hour format
+
+        Returns:
+            Time string in 24-hour format (HH:MM)
+
+        Raises:
+            ValueError: If time format is unsupported
+        """
         value = value.strip().lower().replace(".", "")
         if value.endswith("a") or value.endswith("p"):
             value = value + "m"
@@ -203,8 +271,17 @@ class NFLSchedulerCPSAT:
                 continue
         raise ValueError(f"Unsupported time format: {value}")
 
-    def build_unique_slots(self, rows: list[dict[str, str]]) -> list[Slot]:
-        slots = []
+    def build_unique_slots(self, rows: List[Dict[str, str]]) -> List[Slot]:
+        """
+        Build Slot objects from CSV rows.
+
+        Args:
+            rows: CSV rows containing slot information
+
+        Returns:
+            List of Slot objects
+        """
+        slots: List[Slot] = []
         for slot_id, row in enumerate(rows):
             game_date = self.parse_csv_date(row["Date"])
             week = ((game_date - self.SEASON_START).days // 7) + 1
@@ -220,7 +297,13 @@ class NFLSchedulerCPSAT:
             )
         return slots
 
-    def load_data(self):
+    def load_data(self) -> None:
+        """
+        Load matchup and slot data from CSV files.
+
+        Raises:
+            ValueError: If matchup count doesn't match slot count
+        """
         game_rows = self.read_simple_csv(self.matchups_csv_path)
         slot_rows = self.read_simple_csv(self.slots_csv_path)
 
@@ -230,8 +313,14 @@ class NFLSchedulerCPSAT:
         if len(self.games) != len(self.slots):
             raise ValueError("The matchup count must match the number of unique CSV slots.")
 
-    def validate_division_home_away_pairs(self):
-        pair_counts: dict[tuple[str, str], int] = {}
+    def validate_division_home_away_pairs(self) -> None:
+        """
+        Validate that each division has proper home/away pairings.
+
+        Raises:
+            ValueError: If division pairings are invalid
+        """
+        pair_counts: Dict[Tuple[TeamName, TeamName], int] = {}
         for game in self.games:
             if TEAM_TO_DIVISION[game.home] == TEAM_TO_DIVISION[game.away]:
                 pair_counts[(game.home, game.away)] = pair_counts.get((game.home, game.away), 0) + 1
@@ -246,7 +335,10 @@ class NFLSchedulerCPSAT:
                             f"Division pair {team_a}/{team_b} must appear once with each team at home."
                         )
 
-    def build_indices(self):
+    def build_indices(self) -> None:
+        """
+        Build index mappings for efficient constraint generation.
+        """
         for team in self.teams:
             self.team_game_indices[team] = [
                 idx for idx, game in enumerate(self.games)
@@ -271,7 +363,10 @@ class NFLSchedulerCPSAT:
                     if slot.week == week and slot.day == day
                 ]
 
-    def create_variables(self):
+    def create_variables(self) -> None:
+        """
+        Create the main decision variables for game-to-slot assignments.
+        """
         slot_max = len(self.slots) - 1
         game_max = len(self.games) - 1
         self.game_to_slot = [
@@ -301,7 +396,10 @@ class NFLSchedulerCPSAT:
         self.model.AddForbiddenAssignments([int_var], [[value] for value in allowed_set]).OnlyEnforceIf(var.Not())
         return var
 
-    def build_slot_relation_bools(self):
+    def build_slot_relation_bools(self) -> None:
+        """
+        Create boolean variables for game-week-day-slot relationships.
+        """
         for game_idx, game in enumerate(self.games):
             for week in self.weeks:
                 self.slot_week_bools[(game_idx, week)] = self.membership_var(
@@ -326,7 +424,7 @@ class NFLSchedulerCPSAT:
                     f"game_{game_idx}_week_{week}_tz_{venue_tz}",
                 )
 
-    def calculate_slot_values(self):
+    def calculate_slot_values(self) -> None:
         """Assign viewership importance values to each slot based on day and time."""
         for slot in self.slots:
             # Prime time slots get highest values
@@ -353,23 +451,27 @@ class NFLSchedulerCPSAT:
         """Check if two teams are in a key rivalry."""
         return frozenset([team1, team2]) in KEY_RIVALRIES
 
-    def calculate_game_quality_scores(self):
-        """Calculate the base quality score for each game based on teams involved."""
+    def calculate_game_quality_scores(self) -> None:
+        """
+        Calculate the base quality score for each game based on teams involved.
+        """
         for game_idx, game in enumerate(self.games):
             # Base score: average of both teams' market values
             home_score = TEAM_MARKET_VALUES.get(game.home, 30)
             away_score = TEAM_MARKET_VALUES.get(game.away, 30)
             base_score = (home_score + away_score) // 2
-            
+
             # Add bonus for rivalries (high-interest matchups)
             rivalry_bonus = 0
             if self.is_rivalry(game.home, game.away):
                 rivalry_bonus = 20
-            
+
             self.game_quality_scores[game_idx] = base_score + rivalry_bonus
 
-    def calculate_game_slot_scores(self):
-        """Calculate the combined score for each game-slot pair."""
+    def calculate_game_slot_scores(self) -> None:
+        """
+        Calculate the combined score for each game-slot pair.
+        """
         for game_idx in range(len(self.games)):
             game_quality = self.game_quality_scores[game_idx]
             for slot_id, slot_value in self.slot_values.items():
@@ -377,31 +479,36 @@ class NFLSchedulerCPSAT:
                 # Normalized by dividing by 100 to scale reasonably
                 self.game_slot_scores[(game_idx, slot_id)] = (game_quality * slot_value) // 10
 
-    def add_viewership_objective(self):
-        """Add objective function to maximize TV viewership."""
+    def add_viewership_objective(self) -> None:
+        """
+        Add objective function to maximize TV viewership.
+        """
         # Create a more efficient objective using element constraints
         # For each game, determine its score based on which slot it's assigned to
         objective_terms = []
-        
+
         for game_idx in range(len(self.games)):
             # Create an IntVar representing the score for this game's slot assignment
             slot_assignment = self.game_to_slot[game_idx]
-            
+
             # Build a mapping of slot_id -> score for this game
             slot_scores = []
             for slot_id in range(len(self.slots)):
                 score = self.game_slot_scores[(game_idx, slot_id)]
                 slot_scores.append(score)
-            
+
             # Create a variable that takes the score value corresponding to the assigned slot
             game_score = self.model.NewIntVar(0, max(slot_scores) if slot_scores else 0, f"game_score_{game_idx}")
             self.model.AddElement(slot_assignment, slot_scores, game_score)
             objective_terms.append(game_score)
-        
+
         if objective_terms:
             self.model.Maximize(sum(objective_terms))
 
-    def make_team_week_helpers(self):
+    def make_team_week_helpers(self) -> None:
+        """
+        Create helper variables for team availability tracking.
+        """
         for team in self.teams:
             team_games = self.team_game_indices[team]
             team_road_games = self.team_away_game_indices[team]
@@ -446,14 +553,20 @@ class NFLSchedulerCPSAT:
                         self.model.Add(helper == 0)
                     self.team_week_timezone_played[(team, week, tz)] = helper
 
-    def add_team_at_most_one_game_per_week(self):
+    def add_team_at_most_one_game_per_week(self) -> None:
+        """
+        Ensure each team plays at most one game per week.
+        """
         for team in self.teams:
             for week in self.weeks:
                 self.model.Add(
                     sum(self.slot_week_bools[(game_idx, week)] for game_idx in self.team_game_indices[team]) <= 1
                 )
 
-    def add_super_bowl_champion_home_opener_constraint(self):
+    def add_super_bowl_champion_home_opener_constraint(self) -> None:
+        """
+        Ensure the Super Bowl champion hosts the Thursday opener in Week 1.
+        """
         candidates = []
         for game_idx in self.games_by_home_team[self.super_bowl_champion]:
             candidates.append(
@@ -465,14 +578,20 @@ class NFLSchedulerCPSAT:
             )
         self.model.AddBoolOr(candidates)
 
-    def add_no_four_straight_road_games_constraint(self):
+    def add_no_four_straight_road_games_constraint(self) -> None:
+        """
+        Prevent teams from playing 4+ consecutive road games.
+        """
         for team in self.teams:
             for start in range(1, 16):
                 self.model.Add(
                     sum(self.team_week_road[(team, week)] for week in range(start, start + 4)) <= 3
                 )
 
-    def add_no_cross_country_ping_pong_constraint(self):
+    def add_no_cross_country_ping_pong_constraint(self) -> None:
+        """
+        Prevent excessive cross-country travel patterns.
+        """
         for team in self.teams:
             for week in range(1, 16):
                 for tz1 in range(4):
@@ -489,11 +608,14 @@ class NFLSchedulerCPSAT:
                                     self.team_week_timezone_played[(team, week + 3, tz4)].Not(),
                                 ])
 
-    def add_stadium_conflict_constraint(self):
+    def add_stadium_conflict_constraint(self) -> None:
+        """
+        Prevent teams that share stadiums from playing home games on the same day.
+        """
         for team_a, team_b in SAME_STADIUM_PAIRS:
             team_a_games = self.games_by_home_team[team_a]
             team_b_games = self.games_by_home_team[team_b]
-            windows: dict[date, list[int]] = {}
+            windows: Dict[date, List[int]] = {}
             for slot in self.slots:
                 windows.setdefault(slot.game_date, []).append(slot.slot_id)
 
@@ -510,7 +632,10 @@ class NFLSchedulerCPSAT:
                             forbidden_pairs,
                         )
 
-    def add_no_three_games_in_eleven_days_constraint(self):
+    def add_no_three_games_in_eleven_days_constraint(self) -> None:
+        """
+        Prevent teams from playing three games within an eleven-day window.
+        """
         for team in self.teams:
             for week in range(1, 17):
                 self.model.AddBoolOr([
@@ -524,7 +649,10 @@ class NFLSchedulerCPSAT:
                     self.team_week_day_played[(team, week + 2, "Thursday")].Not(),
                 ])
 
-    def add_short_week_limit_constraint(self):
+    def add_short_week_limit_constraint(self) -> None:
+        """
+        Limit teams to at most two short weeks (Thursday games following Sunday/Monday/Saturday games).
+        """
         for team in self.teams:
             short_week_vars = []
             for week in range(2, 19):
@@ -544,7 +672,10 @@ class NFLSchedulerCPSAT:
                 short_week_vars.append(short_var)
             self.model.Add(sum(short_week_vars) <= 2)
 
-    def add_west_coast_and_mountain_home_window_constraint(self):
+    def add_west_coast_and_mountain_home_window_constraint(self) -> None:
+        """
+        Prevent Western teams from playing home games at 1:00 PM ET.
+        """
         forbidden_slots = [
             slot.slot_id
             for slot in self.slots
@@ -557,7 +688,10 @@ class NFLSchedulerCPSAT:
                     [[slot_id] for slot_id in forbidden_slots],
                 )
 
-    def add_thanksgiving_hosting_constraint(self):
+    def add_thanksgiving_hosting_constraint(self) -> None:
+        """
+        Ensure Detroit and Dallas host Thanksgiving games in Week 13.
+        """
         det_slots = [
             slot.slot_id
             for slot in self.slots
@@ -577,12 +711,18 @@ class NFLSchedulerCPSAT:
             for game_idx in self.games_by_home_team["DAL"]
         ])
 
-    def add_bye_week_window_constraint(self):
+    def add_bye_week_window_constraint(self) -> None:
+        """
+        Ensure teams play in Weeks 1-4 and 15-18 (no bye weeks in these periods).
+        """
         for team in self.teams:
             for week in [1, 2, 3, 4, 15, 16, 17, 18]:
                 self.model.Add(self.team_week_played[(team, week)] == 1)
 
-    def add_week_18_division_games_constraint(self):
+    def add_week_18_division_games_constraint(self) -> None:
+        """
+        Prevent non-division games from being scheduled in Week 18.
+        """
         week18_slots = [slot.slot_id for slot in self.slots if slot.week == 18]
         for game_idx, game in enumerate(self.games):
             if TEAM_TO_DIVISION[game.home] == TEAM_TO_DIVISION[game.away]:
@@ -592,7 +732,10 @@ class NFLSchedulerCPSAT:
                 [[slot_id] for slot_id in week18_slots],
             )
 
-    def build_model(self):
+    def build_model(self) -> None:
+        """
+        Build the complete CP-SAT model with all constraints and optimization objective.
+        """
         self.load_data()
         self.validate_division_home_away_pairs()
         self.build_indices()
@@ -623,6 +766,16 @@ class NFLSchedulerCPSAT:
         max_time_seconds: float = 600.0,
         num_workers: int = 8,
     ) -> list[dict[str, str | int | bool]] | None:
+        """
+        Solve the CP-SAT model and return the optimized schedule.
+
+        Args:
+            max_time_seconds: Maximum time to spend solving in seconds.
+            num_workers: Number of parallel search workers.
+
+        Returns:
+            List of game assignments sorted by week/date/time, or None if no solution found.
+        """
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = max_time_seconds
         solver.parameters.num_search_workers = num_workers
@@ -651,6 +804,15 @@ class NFLSchedulerCPSAT:
         return sorted(rows, key=lambda row: (row["week"], row["date"], row["time_et"], row["home"], row["away"]))
 
     def format_schedule(self, schedule: list[dict[str, str | int | bool]]) -> str:
+        """
+        Format a solved schedule into a human-readable string.
+
+        Args:
+            schedule: List of game assignments from solve().
+
+        Returns:
+            Formatted schedule string with weeks and game details.
+        """
         lines = []
         current_week = None
         for row in schedule:
